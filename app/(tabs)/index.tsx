@@ -1,128 +1,60 @@
-import { useState, useEffect } from 'react';
-import { 
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, 
-  TextInput, KeyboardAvoidingView, Platform, Dimensions 
+import React, { useState, useEffect } from 'react';
+import {
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
+  KeyboardAvoidingView, Platform
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useFocusEffect } from '@react-navigation/native';
-import { useCallback } from 'react';
 import { Ionicons } from '@expo/vector-icons';
+import { supabase } from '../../lib/supabaseClient';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const { width } = Dimensions.get('window');
+interface OrderItemData {
+  price: number;
+  quantity: number;
+}
+
+interface ProductWithPrice {
+  product_id: string;
+  product_name: string;
+  product_type: string;
+  category_id: string;
+  category_name: string;
+  price: number;
+}
 
 export default function CalculatorScreen() {
-  const [selectedCategory, setSelectedCategory] = useState('normal');
-  const [orderItems, setOrderItems] = useState({}); 
-  const [prices, setPrices] = useState({});
-  
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedType, setSelectedType] = useState('all');
+  // Lista de categorías en DB
+  const [categoryList, setCategoryList] = useState<{ id: string; name: string }[]>([]);
+  // Categoría seleccionada (por 'name')
+  const [selectedCategoryName, setSelectedCategoryName] = useState<string>('');
 
+  // De la antigua "type" (cervezas, vinos...) mantenemos un estado:
+  const [selectedType, setSelectedType] = useState<string>('all');
+
+  // Buscador
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // Lista de "ProductWithPrice"
+  const [productList, setProductList] = useState<ProductWithPrice[]>([]);
+
+  // El "pedido": { [product_id]: { price, quantity } }
+  const [orderItems, setOrderItems] = useState<Record<string, OrderItemData>>({});
+
+  // Manejo de pago
   const [paymentAmount, setPaymentAmount] = useState('');
   const [change, setChange] = useState(0);
   const [total, setTotal] = useState(0);
 
-  // Cargamos precios al enfocar la pantalla
-  useFocusEffect(
-    useCallback(() => {
-      loadPrices();
-    }, [])
-  );
+  // Cargamos categorías y productos+precios al montar
+  useEffect(() => {
+    fetchCategories();
+    fetchProductsAndPrices();
+  }, []);
 
-  const loadPrices = async () => {
-    try {
-      const storedPrices = await AsyncStorage.getItem('prices');
-      if (storedPrices) {
-        setPrices(JSON.parse(storedPrices));
-      } else {
-        // Inicializar con categorías por defecto si no hay datos
-        const defaultPrices = {
-          normal: {},
-          pinchos: {},
-          fiestas: {}
-        };
-        await AsyncStorage.setItem('prices', JSON.stringify(defaultPrices));
-        setPrices(defaultPrices);
-      }
-    } catch (error) {
-      console.error('Error loading prices:', error);
-    }
-  };
-
-  // Añadir un producto al pedido
-  const addItem = (itemName) => {
-    const itemPrice = prices[selectedCategory][itemName].price;
-
-    setOrderItems(prev => {
-      // Si no existe en el pedido, lo creamos con quantity=1
-      if (!prev[itemName]) {
-        return {
-          ...prev,
-          [itemName]: { quantity: 1, price: itemPrice }
-        };
-      } else {
-        // Si ya existe, incrementamos su cantidad
-        return {
-          ...prev,
-          [itemName]: {
-            ...prev[itemName],
-            quantity: prev[itemName].quantity + 1
-          }
-        };
-      }
-    });
-  };
-
-  // Sumar 1 a la cantidad de un producto en el pedido
-  const incrementItem = (itemName) => {
-    setOrderItems(prev => {
-      if (!prev[itemName]) return prev;
-      return {
-        ...prev,
-        [itemName]: {
-          ...prev[itemName],
-          quantity: prev[itemName].quantity + 1
-        }
-      };
-    });
-  };
-
-  // Restar 1 a la cantidad de un producto en el pedido
-  const decrementItem = (itemName) => {
-    setOrderItems(prev => {
-      const current = prev[itemName];
-      if (!current) return prev;
-      
-      // Si al restar 1 queda en 0, lo quitamos del pedido
-      if (current.quantity === 1) {
-        const newOrder = { ...prev };
-        delete newOrder[itemName];
-        return newOrder;
-      } else {
-        return {
-          ...prev,
-          [itemName]: {
-            ...current,
-            quantity: current.quantity - 1
-          }
-        };
-      }
-    });
-  };
-
-  // Limpiar pedido
-  const clearOrder = () => {
-    setOrderItems({});
-    setPaymentAmount('');
-    setChange(0);
-    setTotal(0);
-  };
-
-  // Cada vez que cambie orderItems o paymentAmount, recalcular total y cambio
+  // Recalcular total y cambio
   useEffect(() => {
     let newTotal = 0;
-    Object.values(orderItems).forEach(({ quantity, price }) => {
-      newTotal += quantity * price;
+    Object.values(orderItems).forEach(({ price, quantity }) => {
+      newTotal += price * quantity;
     });
     setTotal(newTotal);
 
@@ -130,89 +62,215 @@ export default function CalculatorScreen() {
     setChange(Math.max(0, pay - newTotal));
   }, [orderItems, paymentAmount]);
 
-  // Handler de cambio en el input de Pago
-  const handlePaymentChange = (text) => {
-    setPaymentAmount(text);
-    // El total/cambio se recalcula en useEffect
-  };
+  // 1. Cargar categorías de la tabla 'categories'
+  async function fetchCategories() {
+    try {
+      const { data, error } = await supabase
+        .from('categories')
+        .select('*')
+        .order('created_at', { ascending: true });
 
-  // Guardar pedido
-  const saveOrder = async () => {
+      if (error) {
+        console.error('Error fetching categories:', error);
+        return;
+      }
+      if (data) {
+        setCategoryList(data);
+        // Si no tenemos nada seleccionado, seleccionamos la primera
+        if (data.length > 0 && !selectedCategoryName) {
+          setSelectedCategoryName(data[0].name);
+        }
+      }
+    } catch (err) {
+      console.error('Error loading categories:', err);
+    }
+  }
+
+  // 2. Cargar product_prices (con join a 'products' y 'categories')
+  async function fetchProductsAndPrices() {
+    try {
+      const { data, error } = await supabase
+        .from('product_prices')
+        .select(`
+          product_id,
+          price,
+          category_id,
+          product:products ( id, name, type ),
+          category:categories ( id, name )
+        `);
+
+      if (error) {
+        console.error('Error fetching product_prices:', error);
+        return;
+      }
+      if (!data) return;
+
+      const list: ProductWithPrice[] = data.map((row: any) => ({
+        product_id: row.product?.id,
+        product_name: row.product?.name,
+        product_type: row.product?.type,
+        category_id: row.category?.id,
+        category_name: row.category?.name,
+        price: row.price,
+      }));
+
+      setProductList(list);
+    } catch (err) {
+      console.error('Error loading products/prices:', err);
+    }
+  }
+
+  // Filtrar según categoría, tipo y search
+  function getFilteredProducts() {
+    return productList.filter((item) => {
+      const matchCategory = item.category_name === selectedCategoryName;
+      const matchType = selectedType === 'all' || item.product_type === selectedType;
+      const matchSearch = item.product_name.toLowerCase().includes(searchQuery.toLowerCase());
+      return matchCategory && matchType && matchSearch;
+    });
+  }
+
+  // Añadir un producto al pedido
+  function addItem(product: ProductWithPrice) {
+    const key = product.product_id;
+    const price = product.price;
+
+    setOrderItems((prev) => {
+      if (!prev[key]) {
+        return {
+          ...prev,
+          [key]: { price, quantity: 1 },
+        };
+      } else {
+        const oldItem = prev[key];
+        return {
+          ...prev,
+          [key]: { ...oldItem, quantity: oldItem.quantity + 1 },
+        };
+      }
+    });
+  }
+
+  // Botones +/- en el resumen
+  function incrementItem(productId: string) {
+    setOrderItems((prev) => {
+      const item = prev[productId];
+      if (!item) return prev;
+      return {
+        ...prev,
+        [productId]: { ...item, quantity: item.quantity + 1 },
+      };
+    });
+  }
+  function decrementItem(productId: string) {
+    setOrderItems((prev) => {
+      const item = prev[productId];
+      if (!item) return prev;
+      if (item.quantity === 1) {
+        const newObj = { ...prev };
+        delete newObj[productId];
+        return newObj;
+      } else {
+        return {
+          ...prev,
+          [productId]: { ...item, quantity: item.quantity - 1 },
+        };
+      }
+    });
+  }
+
+  // Limpiar pedido
+  function clearOrder() {
+    setOrderItems({});
+    setPaymentAmount('');
+    setChange(0);
+    setTotal(0);
+  }
+
+  // Manejar cambio en "Pago"
+  function handlePaymentChange(text: string) {
+    setPaymentAmount(text);
+  }
+
+  // Guardar pedido localmente (para SalesScreen)
+  async function saveOrder() {
     try {
       const timestamp = new Date().toISOString();
 
-      // Pasamos orderItems a un array de { name, price, quantity }
-      const itemsArray = Object.entries(orderItems).map(([name, data]) => ({
-        name,
-        price: data.price,
-        quantity: data.quantity
-      }));
+      // Convertir orderItems a array de strings para SalesScreen
+      const itemsForDisplay = Object.entries(orderItems).map(([productId, data]) => {
+        const foundProd = productList.find((p) => p.product_id === productId);
+        const prodName = foundProd ? foundProd.product_name : productId;
+        const linePrice = (data.price * data.quantity).toFixed(2);
+        return `${prodName} x ${data.quantity} = ${linePrice}€`;
+      });
 
       const order = {
-        items: itemsArray,
+        items: itemsForDisplay, // array de strings
         total,
-        category: selectedCategory,
+        category: selectedCategoryName,
         timestamp,
         paymentAmount: parseFloat(paymentAmount) || 0,
         change,
-      };
+      }
 
-      const existingSales = await AsyncStorage.getItem('sales');
-      const sales = existingSales ? JSON.parse(existingSales) : [];
+      // Leer ventas guardadas en AsyncStorage
+      const existingSalesJson = await AsyncStorage.getItem('sales');
+      const sales = existingSalesJson ? JSON.parse(existingSalesJson) : [];
+
+      // Añadimos este nuevo pedido
       sales.push(order);
+
+      // Guardamos de nuevo
       await AsyncStorage.setItem('sales', JSON.stringify(sales));
 
       clearOrder();
-    } catch (error) {
-      console.error('Error saving order:', error);
+    } catch (err) {
+      console.error('Error saving order:', err);
     }
-  };
+  }
 
-  // Filtrar productos en base al texto y al tipo
-  const filteredItems = Object.entries(prices[selectedCategory] || {}).filter(([name, data]) => {
-    const matchesSearch = name.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesType = (selectedType === 'all') || (data.type === selectedType);
-    return matchesSearch && matchesType;
-  });
+  // Productos filtrados
+  const filteredProducts = getFilteredProducts();
 
   return (
-    <KeyboardAvoidingView 
+    <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       style={styles.container}
     >
-      {/* Barra de categorías en la parte superior */}
+      {/* Barra de categorías arriba (basada en categoryList) */}
       <View style={styles.topBar}>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          style={styles.categorySelector}
           contentContainerStyle={styles.categorySelectorContent}
+          style={styles.categorySelector}
         >
-          {Object.keys(prices).map((category) => (
+          {categoryList.map((cat) => (
             <TouchableOpacity
-              key={category}
+              key={cat.id}
               style={[
                 styles.categoryButton,
-                selectedCategory === category && styles.selectedCategory
+                selectedCategoryName === cat.name && styles.selectedCategory,
               ]}
-              onPress={() => setSelectedCategory(category)}
+              onPress={() => setSelectedCategoryName(cat.name)}
             >
               <Text
                 style={[
                   styles.categoryText,
-                  selectedCategory === category && styles.selectedCategoryText
+                  selectedCategoryName === cat.name && styles.selectedCategoryText,
                 ]}
               >
-                {category}
+                {cat.name}
               </Text>
             </TouchableOpacity>
           ))}
         </ScrollView>
       </View>
 
-      {/* Fila que contiene: buscador + barra de tipos (horizontal) */}
+      {/* Fila con buscador y barra de tipos */}
       <View style={styles.searchAndTypesRow}>
-        {/* Buscador (igual que al principio) */}
+        {/* Buscador */}
         <View style={styles.searchBox}>
           <Ionicons name="search" size={16} color="#666" style={styles.searchIcon} />
           <TextInput
@@ -224,7 +282,7 @@ export default function CalculatorScreen() {
           />
         </View>
 
-        {/* Barra de tipos, también horizontal */}
+        {/* Barra de tipos */}
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -239,97 +297,35 @@ export default function CalculatorScreen() {
               Todos
             </Text>
           </TouchableOpacity>
-          
-          {/* Los tipos que quieras */}
-          <TouchableOpacity
-            style={[styles.typeButton, selectedType === 'cervezas' && styles.selectedType]}
-            onPress={() => setSelectedType('cervezas')}
-          >
-            <Text style={[styles.typeText, selectedType === 'cervezas' && styles.selectedTypeText]}>
-              Cervezas
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.typeButton, selectedType === 'vinos' && styles.selectedType]}
-            onPress={() => setSelectedType('vinos')}
-          >
-            <Text style={[styles.typeText, selectedType === 'vinos' && styles.selectedTypeText]}>
-              Vinos
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.typeButton, selectedType === 'cubatas' && styles.selectedType]}
-            onPress={() => setSelectedType('cubatas')}
-          >
-            <Text style={[styles.typeText, selectedType === 'cubatas' && styles.selectedTypeText]}>
-              Cubatas
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.typeButton, selectedType === 'copas' && styles.selectedType]}
-            onPress={() => setSelectedType('copas')}
-          >
-            <Text style={[styles.typeText, selectedType === 'copas' && styles.selectedTypeText]}>
-              Copas
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.typeButton, selectedType === 'refrescos' && styles.selectedType]}
-            onPress={() => setSelectedType('refrescos')}
-          >
-            <Text style={[styles.typeText, selectedType === 'refrescos' && styles.selectedTypeText]}>
-              Refrescos
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.typeButton, selectedType === 'litros' && styles.selectedType]}
-            onPress={() => setSelectedType('litros')}
-          >
-            <Text style={[styles.typeText, selectedType === 'litros' && styles.selectedTypeText]}>
-              Litros
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.typeButton, selectedType === 'chuches' && styles.selectedType]}
-            onPress={() => setSelectedType('chuches')}
-          >
-            <Text style={[styles.typeText, selectedType === 'chuches' && styles.selectedTypeText]}>
-              Chuches
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.typeButton, selectedType === 'pinchos' && styles.selectedType]}
-            onPress={() => setSelectedType('pinchos')}
-          >
-            <Text style={[styles.typeText, selectedType === 'pinchos' && styles.selectedTypeText]}>
-              Pinchos
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.typeButton, selectedType === 'cafes' && styles.selectedType]}
-            onPress={() => setSelectedType('cafes')}
-          >
-            <Text style={[styles.typeText, selectedType === 'cafes' && styles.selectedTypeText]}>
-              Cafes
-            </Text>
-          </TouchableOpacity>
+
+          {['cervezas','vinos','cubatas','copas','refrescos','litros','chuches','pinchos','cafes'].map((typeItem) => (
+            <TouchableOpacity
+              key={typeItem}
+              style={[styles.typeButton, selectedType === typeItem && styles.selectedType]}
+              onPress={() => setSelectedType(typeItem)}
+            >
+              <Text style={[styles.typeText, selectedType === typeItem && styles.selectedTypeText]}>
+                {typeItem.charAt(0).toUpperCase() + typeItem.slice(1)}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </ScrollView>
       </View>
 
-      {/* Lista de productos */}
+      {/* Lista de productos filtrados */}
       <ScrollView style={styles.itemList}>
-        {filteredItems.map(([name, data]) => (
+        {filteredProducts.map((prod) => (
           <TouchableOpacity
-            key={name}
+            key={`${prod.product_id}-${prod.category_id}`} 
             style={styles.itemButton}
-            onPress={() => addItem(name)}
+            onPress={() => addItem(prod)}
           >
             <View>
-              <Text style={styles.itemName}>{name}</Text>
-              <Text style={styles.itemType}>{data.type}</Text>
+              <Text style={styles.itemName}>{prod.product_name}</Text>
+              <Text style={styles.itemType}>{prod.product_type}</Text>
             </View>
             <Text style={styles.itemPrice}>
-              {data.price.toFixed(2)}€
+              {prod.price.toFixed(2)}€
             </Text>
           </TouchableOpacity>
         ))}
@@ -338,23 +334,30 @@ export default function CalculatorScreen() {
       {/* Resumen del pedido */}
       <View style={styles.orderSummary}>
         <ScrollView style={styles.orderItems}>
-          {Object.entries(orderItems).map(([itemName, data]) => (
-            <View key={itemName} style={styles.orderItemRow}>
-              <Text style={styles.orderItemText}>
-                {itemName} ({data.price.toFixed(2)}€) x {data.quantity}
-              </Text>
-              <View style={styles.orderButtons}>
-                {/* Botón “–” */}
-                <TouchableOpacity onPress={() => decrementItem(itemName)}>
-                  <Ionicons name="remove-circle-outline" size={24} color="#ff4444" />
-                </TouchableOpacity>
-                {/* Botón “+” */}
-                <TouchableOpacity onPress={() => incrementItem(itemName)} style={{ marginLeft: 12 }}>
-                  <Ionicons name="add-circle-outline" size={24} color="#00ff87" />
-                </TouchableOpacity>
+          {Object.entries(orderItems).map(([productId, data]) => {
+            const foundProd = productList.find(p => p.product_id === productId);
+            const displayName = foundProd ? foundProd.product_name : productId;
+            const lineTotal = (data.price * data.quantity).toFixed(2);
+
+            return (
+              <View key={productId} style={styles.orderItemRow}>
+                <Text style={styles.orderItemText}>
+                  {displayName} ({data.price.toFixed(2)}€) x {data.quantity} = {lineTotal}€
+                </Text>
+                <View style={styles.orderButtons}>
+                  <TouchableOpacity onPress={() => decrementItem(productId)}>
+                    <Ionicons name="remove-circle-outline" size={24} color="#ff4444" />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => incrementItem(productId)}
+                    style={{ marginLeft: 12 }}
+                  >
+                    <Ionicons name="add-circle-outline" size={24} color="#00ff87" />
+                  </TouchableOpacity>
+                </View>
               </View>
-            </View>
-          ))}
+            );
+          })}
         </ScrollView>
 
         {/* Pago / cambio */}
@@ -397,13 +400,12 @@ export default function CalculatorScreen() {
   );
 }
 
-/** --- Estilos --- **/
+// Estilos
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#121212',
   },
-  /** Barra de categorías arriba */
   topBar: {
     backgroundColor: '#1a1a1a',
     paddingVertical: 5,
@@ -436,11 +438,7 @@ const styles = StyleSheet.create({
   selectedCategoryText: {
     color: '#000',
   },
-
-  /** Search + tipos en la misma fila */
   searchAndTypesRow: {
-    flexDirection: 'column',
-    alignItems: 'center',
     backgroundColor: '#1a1a1a',
     paddingVertical: 5,
   },
@@ -449,12 +447,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#2a2a2a',
     borderRadius: 8,
-    marginLeft: 5,
+    marginHorizontal: 5,
     paddingHorizontal: 10,
     height: Platform.OS === 'android' ? 40 : 36,
-    // Le damos un ancho para que la barra de tipos aparezca a la derecha
-    // Si quieres que ocupe todo el espacio posible, usa flex: 1
-    width: '95%',
+    marginBottom: 5,
   },
   searchIcon: {
     marginRight: 8,
@@ -467,10 +463,8 @@ const styles = StyleSheet.create({
     padding: Platform.OS === 'android' ? 8 : 0,
   },
   typeSelector: {
-    marginLeft: 5,
     maxHeight: 40,
-    // Si quieres que la barra de tipos ocupe el resto, pon flex: 1
-    // flex: 1,
+    marginHorizontal: 5,
   },
   typeSelectorContent: {
     alignItems: 'center',
@@ -496,8 +490,6 @@ const styles = StyleSheet.create({
   selectedTypeText: {
     color: '#000',
   },
-
-  /** Lista de productos */
   itemList: {
     flex: 1,
     padding: 10,
@@ -525,8 +517,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: 'bold',
   },
-
-  /** Resumen del pedido */
   orderSummary: {
     backgroundColor: '#1a1a1a',
     padding: 10,
@@ -551,7 +541,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
-
   paymentContainer: {
     marginBottom: 8,
     padding: 8,
@@ -591,8 +580,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: 'bold',
   },
-
-  /** Total y botones */
   totalContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',

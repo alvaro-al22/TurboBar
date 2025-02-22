@@ -19,7 +19,7 @@ export default function SalesScreen() {
 
         // Calcular el total de hoy
         const today = new Date().toISOString().split('T')[0];
-        const todaySales = salesData.filter(sale => 
+        const todaySales = salesData.filter((sale) =>
           sale.timestamp.split('T')[0] === today
         );
         const todayTotal = todaySales.reduce((sum, sale) => sum + sale.total, 0);
@@ -37,7 +37,7 @@ export default function SalesScreen() {
       month: 'numeric',
       day: 'numeric',
       hour: '2-digit',
-      minute: '2-digit'
+      minute: '2-digit',
     });
   };
 
@@ -49,22 +49,35 @@ export default function SalesScreen() {
       </View>
 
       <ScrollView style={styles.salesList}>
-        {sales.slice().reverse().map((sale, index) => (
-          <View key={index} style={styles.saleCard}>
-            <View style={styles.saleHeader}>
-              <Text style={styles.saleTimestamp}>{formatDate(sale.timestamp)}</Text>
-              <Text style={styles.saleCategory}>{sale.category}</Text>
+        {sales
+          .slice()
+          .reverse()
+          .map((sale, index) => (
+            <View key={index} style={styles.saleCard}>
+              <View style={styles.saleHeader}>
+                <Text style={styles.saleTimestamp}>{formatDate(sale.timestamp)}</Text>
+                <Text style={styles.saleCategory}>{sale.category}</Text>
+              </View>
+
+              <View style={styles.itemsList}>
+                {sale.items.map((item, itemIndex) => (
+                  <Text key={itemIndex} style={styles.saleItem}>
+                    {item}
+                  </Text>
+                ))}
+              </View>
+
+              <Text style={styles.saleTotal}>Total: {sale.total.toFixed(2)}€</Text>
+
+              {/* Muestra lo que pagó y el cambio devuelto */}
+              <Text style={styles.salePayment}>
+                Pagó: {sale.paymentAmount?.toFixed(2) || 0}€
+              </Text>
+              <Text style={styles.saleChange}>
+                Cambio: {sale.change?.toFixed(2) || 0}€
+              </Text>
             </View>
-            
-            <View style={styles.itemsList}>
-              {sale.items.map((item, itemIndex) => (
-                <Text key={itemIndex} style={styles.saleItem}>{item}</Text>
-              ))}
-            </View>
-            
-            <Text style={styles.saleTotal}>Total: {sale.total.toFixed(2)}€</Text>
-          </View>
-        ))}
+          ))}
       </ScrollView>
     </View>
   );
@@ -125,6 +138,18 @@ const styles = StyleSheet.create({
     color: '#00ff87',
     fontSize: 18,
     fontWeight: 'bold',
+    textAlign: 'right',
+  },
+  salePayment: {
+    color: '#fff',
+    fontSize: 14,
+    marginTop: 4,
+    textAlign: 'right',
+  },
+  saleChange: {
+    color: '#fff',
+    fontSize: 14,
+    marginTop: 2,
     textAlign: 'right',
   },
 });
