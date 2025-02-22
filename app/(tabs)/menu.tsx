@@ -9,7 +9,7 @@ import { supabase } from '../../lib/supabaseClient';
 export default function MenuScreen() {
   // Lista de productos con sus precios por categoría
   const [products, setProducts] = useState([]);
-  // Lista de categorías
+  // Lista de categorías (necesario si usas "categoryPrices")
   const [categories, setCategories] = useState([]);
 
   // Control del formulario
@@ -17,22 +17,55 @@ export default function MenuScreen() {
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [type, setType] = useState('cervezas');
-
-  // Estructura { [categoryId]: string } para almacenar los precios introducidos
   const [pricesByCategory, setPricesByCategory] = useState({});
 
   useEffect(() => {
+    // Cargar datos iniciales
     fetchCategories();
     fetchAllProductsWithPrices();
+
+    // Suscripción a cambios en products, product_prices
+    const channel = supabase
+      .channel('menu_realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'products' },
+        (payload) => {
+          console.log('Realtime products change:', payload);
+          // Vuelve a cargar la lista de productos
+          fetchAllProductsWithPrices();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'product_prices' },
+        (payload) => {
+          console.log('Realtime product_prices change:', payload);
+          fetchAllProductsWithPrices();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'categories' },
+        (payload) => {
+          console.log('Realtime categories change:', payload);
+          fetchCategories();
+        }
+      )
+      .subscribe();
+
+    // Cleanup: desuscribir al desmontar
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
-  // 1. Cargar todas las categorías
+  // Cargar categorías
   async function fetchCategories() {
     const { data, error } = await supabase
       .from('categories')
       .select('*')
       .order('created_at', { ascending: true });
-
     if (error) {
       console.error('Error fetching categories:', error);
       return;
@@ -42,7 +75,7 @@ export default function MenuScreen() {
     }
   }
 
-  // 2. Cargar productos + precios (tabla intermedia product_prices)
+  // Cargar productos y precios (tabla intermedia)
   async function fetchAllProductsWithPrices() {
     const { data, error } = await supabase
       .from('product_prices')
@@ -61,10 +94,9 @@ export default function MenuScreen() {
     }
     if (!data) return;
 
-    // Agrupar filas por product_id
     const productsMap: Record<string, any> = {};
 
-    data.forEach(row => {
+    data.forEach((row) => {
       const { product, category, price, product_id } = row;
       if (!product) return;
       if (!productsMap[product_id]) {
@@ -88,15 +120,15 @@ export default function MenuScreen() {
     setProducts(productsArray);
   }
 
-  // 3. Crear o Actualizar producto
+  // Crear/Actualizar producto
   async function createOrUpdateProduct() {
     if (!name.trim()) {
       Alert.alert('Error', 'Por favor ingresa el nombre del producto');
       return;
     }
 
-    // Asegurarnos de que se haya introducido un precio para cada categoría
-    const missingPrice = categories.some(cat => !pricesByCategory[cat.id]);
+    // Aseguramos precio en cada categoría
+    const missingPrice = categories.some((cat) => !pricesByCategory[cat.id]);
     if (missingPrice) {
       Alert.alert('Error', 'Por favor ingresa el precio para todas las categorías');
       return;
@@ -106,57 +138,46 @@ export default function MenuScreen() {
       let productId = editingProductId;
 
       if (!productId) {
-        // --- MODO CREAR ---
+        // CREAR
         const { data: newProd, error: insertError } = await supabase
           .from('products')
-          // Usamos .select('*') y .single() para recuperar la fila insertada
           .insert([{ name, type }])
           .select('*')
           .single();
 
-        console.log('Insert product data:', newProd);
-        console.log('Insert product error:', insertError);
-
-        // Si newProd es null => no se pudo crear la fila
         if (!newProd) {
           Alert.alert('Error', insertError?.message || 'No se pudo crear el producto');
           return;
         }
-        // Asignamos productId
         productId = newProd.id;
-
       } else {
-        // --- MODO EDITAR ---
+        // EDITAR
         const { data: updatedProd, error: updateError } = await supabase
           .from('products')
           .update({ name: name.trim(), type })
           .eq('id', productId)
-          .select('*') // también podemos usar .select('*').single();
+          .select('*')
           .single();
-
-        console.log('Update product data:', updatedProd);
-        console.log('Update product error:', updateError);
 
         if (!updatedProd) {
           Alert.alert('Error', updateError?.message || 'No se pudo actualizar el producto');
           return;
         }
 
-        // Borramos precios antiguos para re-insertar
+        // Borramos los precios antiguos
         const { error: delPricesError } = await supabase
           .from('product_prices')
           .delete()
           .eq('product_id', productId);
 
         if (delPricesError) {
-          console.error('Error deleting old prices:', delPricesError);
           Alert.alert('Error', delPricesError.message || 'No se pudo actualizar los precios');
           return;
         }
       }
 
-      // Insertar (o re-insertar) los precios en product_prices
-      const rowsToInsert = categories.map(cat => ({
+      // Insertar (o re-insertar) los precios
+      const rowsToInsert = categories.map((cat) => ({
         product_id: productId,
         category_id: cat.id,
         price: parseFloat(pricesByCategory[cat.id]) || 0,
@@ -166,12 +187,11 @@ export default function MenuScreen() {
         .insert(rowsToInsert);
 
       if (insertPricesError) {
-        console.error('Error inserting product_prices:', insertPricesError);
         Alert.alert('Error', insertPricesError.message || 'No se pudieron guardar los precios');
         return;
       }
 
-      // Recargar la lista de productos
+      // Recargar
       fetchAllProductsWithPrices();
       resetForm();
     } catch (err) {
@@ -180,7 +200,7 @@ export default function MenuScreen() {
     }
   }
 
-  // 4. Eliminar producto
+  // Eliminar producto
   async function removeProduct(productId: string) {
     Alert.alert(
       'Confirmar eliminación',
@@ -198,13 +218,11 @@ export default function MenuScreen() {
                 .eq('id', productId);
 
               if (error) {
-                console.error('Error deleting product:', error);
                 Alert.alert('Error', error.message || 'No se pudo eliminar el producto');
                 return;
               }
               fetchAllProductsWithPrices();
             } catch (e) {
-              console.error('Error removing product:', e);
               Alert.alert('Error', 'Excepción al eliminar el producto');
             }
           },
@@ -218,11 +236,13 @@ export default function MenuScreen() {
     setEditingProductId(null);
     setName('');
     setType('cervezas');
+
     const initialPrices: Record<string, string> = {};
-    categories.forEach(cat => {
+    categories.forEach((cat) => {
       initialPrices[cat.id] = '';
     });
     setPricesByCategory(initialPrices);
+
     setShowForm(true);
   }
 
@@ -232,10 +252,9 @@ export default function MenuScreen() {
     setName(prod.name);
     setType(prod.type);
 
-    // Cargamos los precios
     const mapPrices: Record<string, string> = {};
-    categories.forEach(cat => {
-      const found = prod.prices.find(p => p.categoryId === cat.id);
+    categories.forEach((cat) => {
+      const found = prod.prices.find((p) => p.categoryId === cat.id);
       mapPrices[cat.id] = found ? found.price.toString() : '';
     });
     setPricesByCategory(mapPrices);
@@ -248,7 +267,7 @@ export default function MenuScreen() {
     setName('');
     setType('cervezas');
     const emptyMap: Record<string, string> = {};
-    categories.forEach(cat => {
+    categories.forEach((cat) => {
       emptyMap[cat.id] = '';
     });
     setPricesByCategory(emptyMap);
@@ -284,14 +303,10 @@ export default function MenuScreen() {
             onChangeText={setName}
           />
 
-          {/* Selección de tipo */}
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.typeSelector}
-          >
-            {['cervezas', 'vinos', 'cubatas', 'copas', 'refrescos', 'litros', 'chuches', 'pinchos', 'cafes']
-              .map(tipo => (
+          {/* Selector de tipo */}
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.typeSelector}>
+            {['cervezas','vinos','cubatas','copas','refrescos','litros','chuches','pinchos','cafes']
+              .map((tipo) => (
                 <TouchableOpacity
                   key={tipo}
                   style={[styles.typeButton, type === tipo && styles.selectedType]}
@@ -306,7 +321,7 @@ export default function MenuScreen() {
 
           {/* Inputs de precio para cada categoría */}
           <View>
-            {categories.map(cat => (
+            {categories.map((cat) => (
               <View key={cat.id} style={styles.priceInputRow}>
                 <Text style={styles.priceLabel}>{cat.name}</Text>
                 <TextInput
@@ -314,8 +329,8 @@ export default function MenuScreen() {
                   placeholder={`Precio para ${cat.name}`}
                   placeholderTextColor="#666"
                   value={pricesByCategory[cat.id]}
-                  onChangeText={val => {
-                    setPricesByCategory(prev => ({
+                  onChangeText={(val) => {
+                    setPricesByCategory((prev) => ({
                       ...prev,
                       [cat.id]: val,
                     }));
@@ -342,7 +357,7 @@ export default function MenuScreen() {
 
       {/* Lista de productos */}
       <ScrollView style={styles.itemList}>
-        {products.map(prod => (
+        {products.map((prod) => (
           <View key={prod.id} style={styles.itemRow}>
             <TouchableOpacity
               style={styles.itemInfo}
@@ -353,7 +368,7 @@ export default function MenuScreen() {
             </TouchableOpacity>
 
             <View style={styles.priceList}>
-              {prod.prices.map(p => (
+              {prod.prices.map((p) => (
                 <Text key={p.categoryId} style={styles.price}>
                   {p.categoryName}: {p.price.toFixed(2)}€
                 </Text>
@@ -373,7 +388,7 @@ export default function MenuScreen() {
   );
 }
 
-/** --- ESTILOS --- **/
+// --- ESTILOS MenuScreen ---
 const styles = StyleSheet.create({
   container: {
     flex: 1,
