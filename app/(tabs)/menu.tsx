@@ -1,29 +1,27 @@
 import React, { useState, useEffect } from 'react';
-import { 
+import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
   ScrollView, Alert, Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { supabase } from '../../lib/supabaseClient'; // tu cliente Supabase
+import { supabase } from '../../lib/supabaseClient';
 
 export default function MenuScreen() {
   // Lista de productos con sus precios por categoría
   const [products, setProducts] = useState([]);
-  // Lista de categorías (p.ej. normal, pinchos, fiestas)
+  // Lista de categorías
   const [categories, setCategories] = useState([]);
 
-  // Controlar el formulario (crear / editar)
+  // Control del formulario
   const [showForm, setShowForm] = useState(false);
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [type, setType] = useState('cervezas');
 
-  // pricesByCategory: { [categoryId]: string }
-  // Donde guardamos los precios introducidos en el form
+  // Estructura { [categoryId]: string } para almacenar los precios introducidos
   const [pricesByCategory, setPricesByCategory] = useState({});
 
   useEffect(() => {
-    // Al montar, cargamos categorías y productos
     fetchCategories();
     fetchAllProductsWithPrices();
   }, []);
@@ -44,10 +42,8 @@ export default function MenuScreen() {
     }
   }
 
-  // 2. Cargar todos los productos con sus precios (join product_prices, categories)
+  // 2. Cargar productos + precios (tabla intermedia product_prices)
   async function fetchAllProductsWithPrices() {
-    // Opción: un join manual, o un "select" anidado
-    // Ejemplo manual: traemos la tabla intermedia
     const { data, error } = await supabase
       .from('product_prices')
       .select(`
@@ -65,10 +61,7 @@ export default function MenuScreen() {
     }
     if (!data) return;
 
-    // Agrupar por producto
-    // productsMap[product_id] = {
-    //   id, name, type, prices: [ { categoryId, categoryName, price }, ... ]
-    // }
+    // Agrupar filas por product_id
     const productsMap: Record<string, any> = {};
 
     data.forEach(row => {
@@ -86,24 +79,23 @@ export default function MenuScreen() {
         productsMap[product_id].prices.push({
           categoryId: category.id,
           categoryName: category.name,
-          price: price,
+          price,
         });
       }
     });
 
-    // Convertir en array
-    // Podríamos volver a Supabase para agarrar productos sin precio, si existen
     const productsArray = Object.values(productsMap);
     setProducts(productsArray);
   }
 
-  // 3. Crear un nuevo producto (o editar) en la BD
+  // 3. Crear o Actualizar producto
   async function createOrUpdateProduct() {
     if (!name.trim()) {
       Alert.alert('Error', 'Por favor ingresa el nombre del producto');
       return;
     }
-    // Asegurar que ingresemos un precio para cada categoría
+
+    // Asegurarnos de que se haya introducido un precio para cada categoría
     const missingPrice = categories.some(cat => !pricesByCategory[cat.id]);
     if (missingPrice) {
       Alert.alert('Error', 'Por favor ingresa el precio para todas las categorías');
@@ -112,38 +104,58 @@ export default function MenuScreen() {
 
     try {
       let productId = editingProductId;
-      if (!productId) {
-        // Crear un nuevo producto
-        const { data: newProd, error } = await supabase
-        .from('products')
-        .insert([{ name: name.trim(), type }])
-        .single();
-      
-        console.log(error); // ver qué error hay
-        if (error) return;
-        console.log(newProd); 
-        productId = newProd.id;
-      } else {
-        // Actualizar el producto
-        const { error } = await supabase
-          .from('products')
-          .update({ name: name.trim(), type })
-          .eq('id', productId);
 
-        if (error) {
-          console.error('Error updating product:', error);
+      if (!productId) {
+        // --- MODO CREAR ---
+        const { data: newProd, error: insertError } = await supabase
+          .from('products')
+          // Usamos .select('*') y .single() para recuperar la fila insertada
+          .insert([{ name, type }])
+          .select('*')
+          .single();
+
+        console.log('Insert product data:', newProd);
+        console.log('Insert product error:', insertError);
+
+        // Si newProd es null => no se pudo crear la fila
+        if (!newProd) {
+          Alert.alert('Error', insertError?.message || 'No se pudo crear el producto');
           return;
         }
-        // Primero podríamos borrar los precios viejos y luego re-insertar,
-        // o hacer un upsert uno por uno. Aquí, para simplificar, borramos e insertamos.
-        // O usas un loop a .upsert() con unique keys.
-        await supabase
+        // Asignamos productId
+        productId = newProd.id;
+
+      } else {
+        // --- MODO EDITAR ---
+        const { data: updatedProd, error: updateError } = await supabase
+          .from('products')
+          .update({ name: name.trim(), type })
+          .eq('id', productId)
+          .select('*') // también podemos usar .select('*').single();
+          .single();
+
+        console.log('Update product data:', updatedProd);
+        console.log('Update product error:', updateError);
+
+        if (!updatedProd) {
+          Alert.alert('Error', updateError?.message || 'No se pudo actualizar el producto');
+          return;
+        }
+
+        // Borramos precios antiguos para re-insertar
+        const { error: delPricesError } = await supabase
           .from('product_prices')
           .delete()
           .eq('product_id', productId);
+
+        if (delPricesError) {
+          console.error('Error deleting old prices:', delPricesError);
+          Alert.alert('Error', delPricesError.message || 'No se pudo actualizar los precios');
+          return;
+        }
       }
 
-      // Insertar (o re-insertar) los precios
+      // Insertar (o re-insertar) los precios en product_prices
       const rowsToInsert = categories.map(cat => ({
         product_id: productId,
         category_id: cat.id,
@@ -155,14 +167,16 @@ export default function MenuScreen() {
 
       if (insertPricesError) {
         console.error('Error inserting product_prices:', insertPricesError);
+        Alert.alert('Error', insertPricesError.message || 'No se pudieron guardar los precios');
         return;
       }
 
-      // Recargar la lista
+      // Recargar la lista de productos
       fetchAllProductsWithPrices();
       resetForm();
-    } catch (error) {
-      console.error('Error saving product:', error);
+    } catch (err) {
+      console.error('Error saving product:', err);
+      Alert.alert('Error', 'Excepción al guardar el producto');
     }
   }
 
@@ -185,12 +199,13 @@ export default function MenuScreen() {
 
               if (error) {
                 console.error('Error deleting product:', error);
+                Alert.alert('Error', error.message || 'No se pudo eliminar el producto');
                 return;
               }
-              // Recargar
               fetchAllProductsWithPrices();
-            } catch (err) {
-              console.error('Error removing product:', err);
+            } catch (e) {
+              console.error('Error removing product:', e);
+              Alert.alert('Error', 'Excepción al eliminar el producto');
             }
           },
         },
@@ -198,31 +213,28 @@ export default function MenuScreen() {
     );
   }
 
-  // Preparar form en modo "crear"
+  // MODO CREAR
   function startCreating() {
     setEditingProductId(null);
     setName('');
     setType('cervezas');
-    // Precios vacíos
-    const initialPrices = {};
+    const initialPrices: Record<string, string> = {};
     categories.forEach(cat => {
       initialPrices[cat.id] = '';
     });
     setPricesByCategory(initialPrices);
-
     setShowForm(true);
   }
 
-  // Preparar form en modo "editar"
+  // MODO EDITAR
   function startEditing(prod) {
     setEditingProductId(prod.id);
     setName(prod.name);
     setType(prod.type);
 
-    // Llenar pricesByCategory
-    const mapPrices = {};
+    // Cargamos los precios
+    const mapPrices: Record<string, string> = {};
     categories.forEach(cat => {
-      // Buscar si en prod.prices hay esa cat
       const found = prod.prices.find(p => p.categoryId === cat.id);
       mapPrices[cat.id] = found ? found.price.toString() : '';
     });
@@ -235,7 +247,7 @@ export default function MenuScreen() {
     setEditingProductId(null);
     setName('');
     setType('cervezas');
-    const emptyMap = {};
+    const emptyMap: Record<string, string> = {};
     categories.forEach(cat => {
       emptyMap[cat.id] = '';
     });
@@ -250,10 +262,8 @@ export default function MenuScreen() {
         style={styles.addProductButton}
         onPress={() => {
           if (showForm) {
-            // Ocultar form
             resetForm();
           } else {
-            // Nuevo producto
             startCreating();
           }
         }}
@@ -263,7 +273,7 @@ export default function MenuScreen() {
         </Text>
       </TouchableOpacity>
 
-      {/* FORMULARIO Crear/Editar */}
+      {/* Formulario Crear/Editar */}
       {showForm && (
         <View style={styles.inputContainer}>
           <TextInput
@@ -274,24 +284,27 @@ export default function MenuScreen() {
             onChangeText={setName}
           />
 
-          {/* Seleccionar tipo */}
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.typeSelector}>
-            {['cervezas','vinos','cubatas','copas','refrescos','litros','chuches','pinchos','cafes']
+          {/* Selección de tipo */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.typeSelector}
+          >
+            {['cervezas', 'vinos', 'cubatas', 'copas', 'refrescos', 'litros', 'chuches', 'pinchos', 'cafes']
               .map(tipo => (
                 <TouchableOpacity
                   key={tipo}
                   style={[styles.typeButton, type === tipo && styles.selectedType]}
-                  onPress={() => setType(tipo)}>
-                  <Text
-                    style={[styles.typeText, type === tipo && styles.selectedTypeText]}
-                  >
+                  onPress={() => setType(tipo)}
+                >
+                  <Text style={[styles.typeText, type === tipo && styles.selectedTypeText]}>
                     {tipo}
                   </Text>
                 </TouchableOpacity>
               ))}
           </ScrollView>
 
-          {/* Inputs de precio para cada categoría dinámica */}
+          {/* Inputs de precio para cada categoría */}
           <View>
             {categories.map(cat => (
               <View key={cat.id} style={styles.priceInputRow}>
@@ -313,7 +326,7 @@ export default function MenuScreen() {
             ))}
           </View>
 
-          {/* Botones Cancelar / Guardar */}
+          {/* Botones Guardar/Cancelar */}
           <View style={styles.formButtons}>
             <TouchableOpacity style={styles.cancelButton} onPress={resetForm}>
               <Text style={styles.cancelButtonText}>Cancelar</Text>
@@ -331,7 +344,6 @@ export default function MenuScreen() {
       <ScrollView style={styles.itemList}>
         {products.map(prod => (
           <View key={prod.id} style={styles.itemRow}>
-            {/* Al pulsar, editamos */}
             <TouchableOpacity
               style={styles.itemInfo}
               onPress={() => startEditing(prod)}
@@ -340,7 +352,6 @@ export default function MenuScreen() {
               <Text style={styles.itemType}>{prod.type}</Text>
             </TouchableOpacity>
 
-            {/* Mostrar precios por categoría */}
             <View style={styles.priceList}>
               {prod.prices.map(p => (
                 <Text key={p.categoryId} style={styles.price}>
@@ -349,7 +360,6 @@ export default function MenuScreen() {
               ))}
             </View>
 
-            {/* Botón eliminar */}
             <TouchableOpacity
               style={styles.deleteButton}
               onPress={() => removeProduct(prod.id)}
