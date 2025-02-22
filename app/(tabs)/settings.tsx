@@ -1,53 +1,73 @@
-import { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, TextInput, ScrollView } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useState, useEffect, useCallback } from 'react';
+import { 
+  View, Text, StyleSheet, TouchableOpacity, Alert, 
+  TextInput, ScrollView 
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { supabase } from '../../lib/supabaseClient'; // <-- tu archivo de configuración
+import { useFocusEffect } from 'expo-router';
 
 export default function SettingsScreen() {
-  const [categories, setCategories] = useState({});
+  const [categories, setCategories] = useState<any[]>([]);
   const [newCategoryId, setNewCategoryId] = useState('');
 
-  useEffect(() => {
-    loadCategories();
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      fetchCategories();
+    }, [])
+  );
 
-  const loadCategories = async () => {
+  // 1. CARGAR categorías desde Supabase
+  async function fetchCategories() {
     try {
-      const storedPrices = await AsyncStorage.getItem('prices');
-      if (storedPrices) {
-        setCategories(JSON.parse(storedPrices));
+      const { data, error } = await supabase
+        .from('categories')
+        .select('*')
+        .order('created_at', { ascending: true });
+      
+      if (error) {
+        console.error('Error fetching categories:', error);
+        return;
+      }
+      if (data) {
+        setCategories(data);
       }
     } catch (error) {
       console.error('Error loading categories:', error);
     }
-  };
+  }
 
+  // 2. AÑADIR categoría en Supabase
   const addCategory = async () => {
-    if (!newCategoryId) {
-      Alert.alert('Error', 'Por favor completa todos los campos');
+    if (!newCategoryId.trim()) {
+      Alert.alert('Error', 'Por favor introduce un nombre de categoría');
       return;
     }
 
-    if (categories[newCategoryId]) {
-      Alert.alert('Error', 'Ya existe una categoría con este ID');
+    // Comprobar si ya existe localmente
+    const alreadyExists = categories.some(cat => cat.name === newCategoryId);
+    if (alreadyExists) {
+      Alert.alert('Error', 'Ya existe una categoría con este nombre');
       return;
     }
 
     try {
-      const newCategories = { ...categories };
-      newCategories[newCategoryId] = {};
+      // Insertar en Supabase
+      const { data, error } = await supabase
+        .from('categories')
+        .insert([{ name: newCategoryId.trim() }])
+        .single();
 
-      // Copiar todos los productos existentes a la nueva categoría
-      Object.keys(categories.normal || {}).forEach(productName => {
-        const product = categories.normal[productName];
-        newCategories[newCategoryId][productName] = {
-          ...product,
-          price: 0
-        };
-      });
+      if (error) {
+        console.error('Error inserting category:', error);
+        Alert.alert('Error', 'No se pudo guardar la categoría');
+        return;
+      }
 
-      await AsyncStorage.setItem('prices', JSON.stringify(newCategories));
-      setCategories(newCategories);
+      // Actualizamos el estado local
+      if (data) {
+        setCategories(prev => [...prev, data]);
+      }
       setNewCategoryId('');
       Alert.alert('Éxito', 'Categoría añadida correctamente');
     } catch (error) {
@@ -56,15 +76,17 @@ export default function SettingsScreen() {
     }
   };
 
-  const removeCategory = async (categoryId) => {
-    if (categoryId === 'normal' || categoryId === 'pinchos' || categoryId === 'fiestas') {
+  // 3. ELIMINAR categoría en Supabase
+  const removeCategory = async (categoryId: string, categoryName: string) => {
+    // Evitar borrar las categorías predeterminadas
+    if (['normal', 'pinchos', 'fiestas'].includes(categoryName)) {
       Alert.alert('Error', 'No se pueden eliminar las categorías predeterminadas');
       return;
     }
 
     Alert.alert(
       'Confirmar eliminación',
-      '¿Estás seguro de que quieres eliminar esta categoría?',
+      `¿Estás seguro de que quieres eliminar la categoría "${categoryName}"?`,
       [
         {
           text: 'Cancelar',
@@ -75,10 +97,20 @@ export default function SettingsScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              const newCategories = { ...categories };
-              delete newCategories[categoryId];
-              await AsyncStorage.setItem('prices', JSON.stringify(newCategories));
-              setCategories(newCategories);
+              // Borrar en Supabase
+              const { error } = await supabase
+                .from('categories')
+                .delete()
+                .eq('id', categoryId);
+
+              if (error) {
+                console.error('Error removing category:', error);
+                Alert.alert('Error', 'No se pudo eliminar la categoría');
+                return;
+              }
+
+              // Actualizar estado local
+              setCategories(prev => prev.filter(cat => cat.id !== categoryId));
             } catch (error) {
               console.error('Error removing category:', error);
               Alert.alert('Error', 'No se pudo eliminar la categoría');
@@ -89,10 +121,12 @@ export default function SettingsScreen() {
     );
   };
 
+  // 4. RESETEAR TODOS LOS DATOS
+  //   (ejemplo: borrar todo y recrear "normal", "pinchos", "fiestas")
   const resetAllData = () => {
     Alert.alert(
       'Confirmar reinicio',
-      '¿Estás seguro de que quieres eliminar todos los datos? Esta acción no se puede dehacer.',
+      '¿Estás seguro de que quieres eliminar todos los datos? Esta acción no se puede deshacer.',
       [
         {
           text: 'Cancelar',
@@ -103,13 +137,33 @@ export default function SettingsScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              await AsyncStorage.setItem('prices', JSON.stringify({
-                normal: {},
-                pinchos: {},
-                fiestas: {}
-              }));
-              await AsyncStorage.setItem('sales', JSON.stringify([]));
-              loadCategories();
+              // (opcional) Borrar otras tablas relacionadas si lo deseas:
+              // Ej: product_prices, products, etc.
+              // EJEMPLO:
+              // await supabase.from('product_prices').delete().neq('id', '');
+              // await supabase.from('products').delete().neq('id', '');
+
+              // Borramos todas las categorías
+              await supabase.from('categories').delete().neq('id', '');
+
+              // Volvemos a crear las 3 categorías "base"
+              const { error } = await supabase
+                .from('categories')
+                .insert([
+                  { name: 'normal' },
+                  { name: 'pinchos' },
+                  { name: 'fiestas' },
+                ]);
+              if (error) {
+                console.error('Error inserting default categories:', error);
+              }
+
+              // Vaciamos la tabla "sales", si la tienes en supabase:
+              // await supabase.from('sales').delete().neq('id', '');
+
+              // Volvemos a cargar
+              fetchCategories();
+
               Alert.alert('Éxito', 'Todos los datos han sido reiniciados');
             } catch (error) {
               console.error('Error resetting data:', error);
@@ -123,8 +177,10 @@ export default function SettingsScreen() {
 
   return (
     <View style={styles.container}>
+      {/* Sección de gestión de categorías */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Gestión de Categorías</Text>
+
         <View style={styles.inputContainer}>
           <TextInput
             style={styles.input}
@@ -139,13 +195,14 @@ export default function SettingsScreen() {
         </View>
 
         <ScrollView style={styles.categoriesList}>
-          {Object.keys(categories).map((categoryId) => (
-            <View key={categoryId} style={styles.categoryItem}>
-              <Text style={styles.categoryName}>{categoryId}</Text>
-              {!['normal', 'pinchos', 'fiestas'].includes(categoryId) && (
+          {categories.map((cat) => (
+            <View key={cat.id} style={styles.categoryItem}>
+              <Text style={styles.categoryName}>{cat.name}</Text>
+              {/* Botón eliminar si no es 'normal', 'pinchos', 'fiestas' */}
+              {(!['normal', 'pinchos', 'fiestas'].includes(cat.name)) && (
                 <TouchableOpacity
                   style={styles.deleteButton}
-                  onPress={() => removeCategory(categoryId)}>
+                  onPress={() => removeCategory(cat.id, cat.name)}>
                   <Ionicons name="trash-outline" size={24} color="#ff4444" />
                 </TouchableOpacity>
               )}
@@ -154,6 +211,7 @@ export default function SettingsScreen() {
         </ScrollView>
       </View>
 
+      {/* Sección para resetear datos */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Gestión de Datos</Text>
         <TouchableOpacity style={styles.resetButton} onPress={resetAllData}>
@@ -161,6 +219,7 @@ export default function SettingsScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* Sección Acerca de... */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Acerca de</Text>
         <Text style={styles.aboutText}>
@@ -172,6 +231,7 @@ export default function SettingsScreen() {
   );
 }
 
+/** --- Estilos --- **/
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -212,6 +272,7 @@ const styles = StyleSheet.create({
   },
   categoriesList: {
     maxHeight: 200,
+    marginTop: 10,
   },
   categoryItem: {
     flexDirection: 'row',

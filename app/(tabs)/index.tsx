@@ -341,7 +341,7 @@ export default function CalculatorScreen() {
           {Object.entries(orderItems).map(([itemName, data]) => (
             <View key={itemName} style={styles.orderItemRow}>
               <Text style={styles.orderItemText}>
-                {itemName} ({data.price.toFixed(2)}€) x {data.quantity} = {(data.price * data.quantity).toFixed(2)}
+                {itemName} ({data.price.toFixed(2)}€) x {data.quantity}
               </Text>
               <View style={styles.orderButtons}>
                 {/* Botón “–” */}
